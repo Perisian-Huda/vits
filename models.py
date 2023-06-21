@@ -486,7 +486,10 @@ class SynthesizerTrn(nn.Module):
       # This code       : log(N(f(x); μ, σ)) = -0.5 * ln(2π) - logs_p - (f(x)-m_p)² * (2 * σ²)^-1
       #                                      = -0.5 * ln(2π) - logs_p - (f(x)-m_p)² * (2 * exp( 2 log σ))^-1
       #                                      = -0.5 * ln(2π) - logs_p - (f(x)-m_p)² * (0.5 * exp(- 2 log σ))
-      #                                      = -0.5 * ln(2π) - logs_p - (f(x)-m_p)² * (0.5 * s_p_sq_r)
+      #                                      = -0.5 * ln(2π) - logs_p - 0.5 * (f(x)-m_p)² * exp(- 2 log σ)
+      #                                      = -0.5 * ln(2π) - logs_p - 0.5 * (f(x)-m_p)² * sp_sq_r
+      #                                      = -0.5 * ln(2π) - logs_p - 0.5 * (f^2(x)-m^2_p - 2 * f(x) * m_p) * sp_sq_r
+      #                                      = -0.5 * ln(2π) - logs_p - (0.5 * f^2(x) - 0.5 * m^2_p - f(x) * m_p) * sp_sq_r
 
       s_p_sq_r = torch.exp(-2 * logs_p)                                               # [b, d, T_src]
       neg_cent1 = torch.sum(-0.5 * math.log(2 * math.pi) - logs_p, [1], keepdim=True) # [b, 1, T_src] # -0.5 * ln(2π) - logs_p
