@@ -493,15 +493,15 @@ class SynthesizerTrn(nn.Module):
       #                                      = (-0.5 * ln(2π) - logs_p) + (-0.5 * f²(x) * sp_sq_r) + (-0.5 * m_p² * sp_sq_r) + (f(x) * m_p * sp_sq_r)
       #                                      = neg_cent1 + neg_cent2 + neg_cent4 + neg_cent3 
 
-      s_p_sq_r = torch.exp(-2 * logs_p)                                               # [b, d, T_src]
-      neg_cent1 = torch.sum(-0.5 * math.log(2 * math.pi) - logs_p, [1], keepdim=True) # [b, 1, T_src] # -0.5 * ln(2π) - logs_p
-      neg_cent2 = torch.matmul(-0.5 * (z_p ** 2).transpose(1, 2), s_p_sq_r)           # [b, T_tgt, d] x [b, d, T_src] = [b, T_tgt, T_src] # 
-      neg_cent3 = torch.matmul(z_p.transpose(1, 2), (m_p * s_p_sq_r))                 # [b, T_tgt, d] x [b, d, T_src] = [b, T_tgt, T_src]
-      neg_cent4 = torch.sum(-0.5 * (m_p ** 2) * s_p_sq_r, [1], keepdim=True)          # [b, 1, T_src]
-      neg_cent = neg_cent1 + neg_cent2 + neg_cent3 + neg_cent4                        # [b, T_tgt, T_src]
+      s_p_sq_r = torch.exp(-2 * logs_p)                                                           # [b, d, T_src]
+      neg_cent1 = torch.sum(-0.5 * math.log(2 * math.pi) - logs_p, [1], keepdim=True)             # [b, 1, T_src] # -0.5 * ln(2π) - logs_p
+      neg_cent2 = torch.matmul(-0.5 * (z_p ** 2).transpose(1, 2), s_p_sq_r)                       # [b, T_tgt, d] @ [b, d, T_src] = [b, T_tgt, T_src] # 
+      neg_cent3 = torch.matmul(z_p.transpose(1, 2), (m_p * s_p_sq_r))                             # [b, T_tgt, d] @ [b, d, T_src] = [b, T_tgt, T_src]
+      neg_cent4 = torch.sum(-0.5 * (m_p ** 2) * s_p_sq_r, [1], keepdim=True)                      # [b, 1, T_src]
+      neg_cent = neg_cent1 + neg_cent2 + neg_cent3 + neg_cent4                                    # [b, T_tgt, T_src]
 
-      attn_mask = torch.unsqueeze(x_mask, 2) * torch.unsqueeze(y_mask, -1)                       # [b, 1, T_tgt, T_src]
-      attn = monotonic_align.maximum_path(neg_cent, attn_mask.squeeze(1)).unsqueeze(1).detach()  # [b, 1, T_tgt, T_src]
+      attn_mask = torch.unsqueeze(x_mask, 2) * torch.unsqueeze(y_mask, -1)                        # [b, 1, T_tgt, T_src]
+      attn = monotonic_align.maximum_path(neg_cent, attn_mask.squeeze(1)).unsqueeze(1).detach()   # [b, 1, T_tgt, T_src]
 
     w = attn.sum(2) # [b, 1, T_src]
     if self.use_sdp:
@@ -513,37 +513,38 @@ class SynthesizerTrn(nn.Module):
       l_length = torch.sum((logw - logw_)**2, [1,2]) / torch.sum(x_mask) # for averaging 
 
     # expand prior
-    m_p = torch.matmul(attn.squeeze(1), m_p.transpose(1, 2)).transpose(1, 2)       # [b, d, T_tgt] (last dim was T_src)
-    logs_p = torch.matmul(attn.squeeze(1), logs_p.transpose(1, 2)).transpose(1, 2) # [b, d, T_tgt] (last dim was T_src)
+    m_p = torch.matmul(attn.squeeze(1), m_p.transpose(1, 2)).transpose(1, 2)                  # ([b, T_tgt, T_src] @ [b, T_src, d]).T = [b, d, T_tgt]
+    logs_p = torch.matmul(attn.squeeze(1), logs_p.transpose(1, 2)).transpose(1, 2)            # ([b, T_tgt, T_src] @ [b, T_src, d]).T = [b, d, T_tgt]
 
-    z_slice, ids_slice = commons.rand_slice_segments(z, y_lengths, self.segment_size) # [b, d, seg], [b]
-    o = self.dec(z_slice, g=g)  # [b, 1, audio_length]
+    z_slice, ids_slice = commons.rand_slice_segments(z, y_lengths, self.segment_size)         # [b, d, seg], [b]
+    o = self.dec(z_slice, g=g)                                                                # [b, 1, T_audio]
     return o, l_length, attn, ids_slice, x_mask, y_mask, (z, z_p, m_p, logs_p, m_q, logs_q)
 
   def infer(self, x, x_lengths, sid=None, noise_scale=1, length_scale=1, noise_scale_w=1., max_len=None):
-    x, m_p, logs_p, x_mask = self.enc_p(x, x_lengths)
+    x, m_p, logs_p, x_mask = self.enc_p(x, x_lengths) # [b, d, T_src], [b, d, T_src], [b, 1, T_src]
     if self.n_speakers > 0:
-      g = self.emb_g(sid).unsqueeze(-1) # [b, h, 1]
+      g = self.emb_g(sid).unsqueeze(-1)               # [b, d, 1]
     else:
       g = None
 
     if self.use_sdp:
-      logw = self.dp(x, x_mask, g=g, reverse=True, noise_scale=noise_scale_w)
+      logw = self.dp(x, x_mask, g=g, reverse=True, noise_scale=noise_scale_w)                   # [b, 1, T_src]
     else:
-      logw = self.dp(x, x_mask, g=g)
-    w = torch.exp(logw) * x_mask * length_scale
-    w_ceil = torch.ceil(w)
-    y_lengths = torch.clamp_min(torch.sum(w_ceil, [1, 2]), 1).long()
-    y_mask = torch.unsqueeze(commons.sequence_mask(y_lengths, None), 1).to(x_mask.dtype)
-    attn_mask = torch.unsqueeze(x_mask, 2) * torch.unsqueeze(y_mask, -1)
-    attn = commons.generate_path(w_ceil, attn_mask)
+      logw = self.dp(x, x_mask, g=g)                                                            # [b, 1, T_src]
+    w = torch.exp(logw) * x_mask * length_scale                                                 # [b, 1, T_src]
+    w_ceil = torch.ceil(w)                                                                      # [b, 1, T_src]
+    
+    y_lengths = torch.clamp_min(torch.sum(w_ceil, [1, 2]), 1).long()                            # [b]
+    y_mask = torch.unsqueeze(commons.sequence_mask(y_lengths, None), 1).to(x_mask.dtype)        # [b, 1, T_tgt]
+    attn_mask = torch.unsqueeze(x_mask, 2) * torch.unsqueeze(y_mask, -1)                        # [b, 1, T_tgt, T_src]
+    attn = commons.generate_path(w_ceil, attn_mask)                                             # [b, 1, T_tgt, T_src]
+    
+    m_p = torch.matmul(attn.squeeze(1), m_p.transpose(1, 2)).transpose(1, 2)         # ([b, T_tgt, T_src] @ [b, T_src, d]).T = [b, d, T_tgt]
+    logs_p = torch.matmul(attn.squeeze(1), logs_p.transpose(1, 2)).transpose(1, 2)   # ([b, T_tgt, T_src] @ [b, T_src, d]).T = [b, d, T_tgt]
 
-    m_p = torch.matmul(attn.squeeze(1), m_p.transpose(1, 2)).transpose(1, 2) # [b, t', t], [b, t, d] -> [b, d, t']
-    logs_p = torch.matmul(attn.squeeze(1), logs_p.transpose(1, 2)).transpose(1, 2) # [b, t', t], [b, t, d] -> [b, d, t']
-
-    z_p = m_p + torch.randn_like(m_p) * torch.exp(logs_p) * noise_scale
-    z = self.flow(z_p, y_mask, g=g, reverse=True)
-    o = self.dec((z * y_mask)[:,:,:max_len], g=g)
+    z_p = m_p + torch.randn_like(m_p) * torch.exp(logs_p) * noise_scale     # [b, d, T_src]
+    z = self.flow(z_p, y_mask, g=g, reverse=True)                           # [b, d, T_src]
+    o = self.dec((z * y_mask)[:,:,:max_len], g=g)                           # [b, 1, T_audio]
     return o, attn, y_mask, (z, z_p, m_p, logs_p)
 
   def voice_conversion(self, y, y_lengths, sid_src, sid_tgt):
