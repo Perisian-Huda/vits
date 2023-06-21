@@ -457,7 +457,18 @@ class SynthesizerTrn(nn.Module):
       self.emb_g = nn.Embedding(n_speakers, gin_channels)
 
   def forward(self, x, x_lengths, y, y_lengths, sid=None):
+    '''
+    args:
+      x: text [b,T_src]
+      x_lengths: text lengths [b]
+      y: mel [b, d, T_tgt]
+      y_lengths: [b]
+    '''
 
+    # x: text embeddings,
+    # m_p: prior mu mean
+    # logs_p: prior log_sigma std (not log_sigma^2)
+    # x_mask: mask for padded x
     x, m_p, logs_p, x_mask = self.enc_p(x, x_lengths) # [b, d, T_src], [b, d, T_src] , [b, d, T_src], [b, 1, T_src]
     if self.n_speakers > 0:
       g = self.emb_g(sid).unsqueeze(-1) # [b, h, 1]
@@ -469,10 +480,17 @@ class SynthesizerTrn(nn.Module):
 
     # the equation N(f_θ(z); µ_θ(c), σ_θ(c)) in equation (4), page 3
     with torch.no_grad():
-      # negative cross-entropy
+      # nll
+      # Gaussian log pdf: log(N(x; μ, σ)) = -0.5 * ln(2π) - ln(σ) - ((x - μ)² / (2 * σ²))
+      #                                       
+      # This code       : log(N(f(x); μ, σ)) = -0.5 * ln(2π) - logs_p - (f(x)-m_p)² * (2 * σ²)^-1
+      #                                      = -0.5 * ln(2π) - logs_p - (f(x)-m_p)² * (2 * exp( 2 log σ))^-1
+      #                                      = -0.5 * ln(2π) - logs_p - (f(x)-m_p)² * (0.5 * exp(- 2 log σ))
+      #                                      = -0.5 * ln(2π) - logs_p - (f(x)-m_p)² * (0.5 * s_p_sq_r)
+
       s_p_sq_r = torch.exp(-2 * logs_p)                                               # [b, d, T_src]
-      neg_cent1 = torch.sum(-0.5 * math.log(2 * math.pi) - logs_p, [1], keepdim=True) # [b, 1, T_src]
-      neg_cent2 = torch.matmul(-0.5 * (z_p ** 2).transpose(1, 2), s_p_sq_r)           # [b, T_tgt, d] x [b, d, T_src] = [b, T_tgt, T_src]
+      neg_cent1 = torch.sum(-0.5 * math.log(2 * math.pi) - logs_p, [1], keepdim=True) # [b, 1, T_src] # -0.5 * ln(2π) - logs_p
+      neg_cent2 = torch.matmul(-0.5 * (z_p ** 2).transpose(1, 2), s_p_sq_r)           # [b, T_tgt, d] x [b, d, T_src] = [b, T_tgt, T_src] # 
       neg_cent3 = torch.matmul(z_p.transpose(1, 2), (m_p * s_p_sq_r))                 # [b, T_tgt, d] x [b, d, T_src] = [b, T_tgt, T_src]
       neg_cent4 = torch.sum(-0.5 * (m_p ** 2) * s_p_sq_r, [1], keepdim=True)          # [b, 1, T_src]
       neg_cent = neg_cent1 + neg_cent2 + neg_cent3 + neg_cent4                        # [b, T_tgt, T_src]
